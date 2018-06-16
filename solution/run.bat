@@ -1,0 +1,2 @@
+python generate_feature_mine.py
+python train_lgb_tune_params.py
