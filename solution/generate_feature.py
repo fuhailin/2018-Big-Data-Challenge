@@ -3,6 +3,9 @@
 import os
 import pandas as pd
 import numpy as np
+from scipy import stats
+from itertools import groupby
+from operator import itemgetter
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -57,8 +60,31 @@ def q75(column):
     return column.quantile(.75)
 
 
+# 偏度Skewness
+def skew(column):
+    return stats.skew(column)
+
+
+# 峰度kurtosis
 def kurt(column):
-    return column.kurt()
+    return stats.kurtosis(column)
+
+
+def discrete(column):
+    if np.mean(column) != 0:
+        return np.std(column) / np.mean(column)
+    else:
+        return np.NaN
+
+
+# 连续多少天启动
+def get_continuous(data):
+    ranges = []
+    for k, g in groupby(enumerate(data), lambda x: x[0] - x[1]):
+        group = (map(itemgetter(1), g))
+        group = list(map(int, group))
+        ranges.append(group[-1] - group[0] + 1)
+    return max(ranges)
 
 
 # APP 启动次数，平均次数，方差，启动天数，最大值，最小值，连续几天启动总次数，平均次数，某一天启动次数
@@ -104,57 +130,118 @@ def get_test_id(feat_path):
     return test_data
 
 
+'''
+    - 提取注册特征(register)
+    1.相对注册日期，在时间窗之前注册的为-1
+    2.注册类型
+    3.设备类型
+
+'''
+
+
 def get_register_feature(register):
     feature = pd.DataFrame()
     feature['user_id'] = register['user_id'].drop_duplicates()
-    end_day = np.max(register['register_day'])
-    feature['register_day'] = register['register_day']
+    # end_day = np.max(register['register_day'])
+    start_day = np.min(register['register_day'])
+    feature['register_day'] = register['register_day'] - start_day + 1
+    feature['register_day'] = feature['register_day'].fillna(-1)
+    feature['register_day'] = feature['register_day'].astype(int)
     feature['register_type'] = register['register_type']
     feature['device_type'] = register['device_type']
-    register_rest_day = (end_day - register.groupby(['user_id'])['register_day'].max()).rename('register_rest_day').reset_index()
-    feature = pd.merge(feature, register_rest_day, how='left', on='user_id')
+    # register_rest_day = (end_day - register.groupby(['user_id'])['register_day'].max()).rename('register_rest_day').reset_index()
+    # feature = pd.merge(feature, register_rest_day, how='left', on='user_id')
     return feature
+
+
+"""
+    - 提取启动特征(launch)
+    1.launch天数序列特征 : 所有序列特征
+    2.launch_diff序列(加入end day取diff) : 所有序列特征 ， 最后一个和倒数第二个值(没有则为0)
+    3.launch 总天数,最后 7 5 3 1天的次数
+    5.launch 第一次启动到时间窗末尾
+    4.launch percent ： 启动总天数 / 第一次启动到时间窗末尾
+    6.launch 连续天数序列： 所有序列特征
+    7.周末的launch总次数(unique)
+    8.周末的Launch总数占总launch数比
+"""
 
 
 def get_launch_feature(launch):
+    launch.sort_values(by=['user_id', 'launch_day'], inplace=True)
     feature = pd.DataFrame()
     feature['user_id'] = launch['user_id'].drop_duplicates()
+    func = ['mean', 'median', 'max', 'min', 'var', 'std', skew, kurt, discrete]
     '''
     launch_fun = launch.groupby('user_id')['launch_day'].agg(func).reset_index()
-    launch_fun = launch_fun.rename(columns={'min': 'app_min', 'mean': 'app_mean', 'median': 'app_median', 'skew': 'app_skew', 'std': 'app_std',
-                                            'mad': 'app_mad', 'ptp': 'app_ptp', 'var': 'app_var', 'var_divide_count': 'app_var_divide_count',
-                                            'last_one': 'app_last_one', 'q25': 'app_q25', 'q75': 'app_q75', 'kurt': 'app_kurt'})
+    launch_fun = launch_fun.rename(columns={'min': 'launch_gap_day_min', 'mean': 'launch_gap_day_mean', 'median': 'launch_gap_day_median', 'skew': 'launch_gap_day_skew',
+                                            'std': 'launch_gap_day_std', 'var': 'launch_gap_day_var', 'kurt': 'launch_gap_day_kurt'})
                                             '''
     end_day = np.max(launch['launch_day'])
-    launch_total_count = launch[['user_id']].groupby(['user_id']).size().rename('launch_total_count').reset_index()  # 启动总次数
-    launch_day_diff = pd.concat([launch['user_id'], launch.groupby(['user_id']).diff().rename({'launch_day': 'launch_day_diff'}, axis=1)], axis=1)
-    launch_day_diff_max = launch_day_diff.groupby(['user_id'])['launch_day_diff'].max().rename('launch_day_diff_max').reset_index()
-    launch_day_diff_min = launch_day_diff.groupby(['user_id'])['launch_day_diff'].min().rename('launch_day_diff_min').reset_index()
-    launch_day_diff_mean = launch_day_diff.groupby(['user_id'])['launch_day_diff'].mean().rename('launch_day_diff_mean').reset_index()
-    launch_day_diff_std = launch_day_diff.groupby(['user_id'])['launch_day_diff'].std().rename('launch_day_diff_std').reset_index()
-    launch_day_diff_kurt = launch_day_diff.groupby(['user_id'])['launch_day_diff'].agg(lambda x: pd.Series.kurt(x)).rename('launch_day_diff_kurt').reset_index()
-    launch_day_diff_skew = launch_day_diff.groupby(['user_id'])['launch_day_diff'].skew().rename('launch_day_diff_skew').reset_index()
-    launch_day_diff_last = launch_day_diff.groupby(['user_id'])['launch_day_diff'].last().rename('launch_day_diff_last').reset_index()
-    launch_last_day = launch.groupby(['user_id'])['launch_day'].max().rename('launch_last_day').reset_index()  # 最后一次启动日期
+    start_day = np.min(launch['launch_day'])
+
+    launch_total_count = launch.groupby(['user_id']).size().rename('launch_total_count').reset_index()  # 启动总次数
+    launch_day_diff = pd.concat([launch['user_id'], launch.groupby(['user_id']).diff().rename({'launch_day': 'launch_day_diff'}, axis=1)],
+                                axis=1)
+    launch_fun = launch_day_diff.groupby('user_id')['launch_day_diff'].agg(func).reset_index()
+    launch_fun = launch_fun.rename(
+        columns={'mean': 'launch_gap_day_mean', 'median': 'launch_gap_day_median', 'max': 'launch_gap_day_max', 'min': 'launch_gap_day_min',
+                 'skew': 'launch_gap_day_skew', 'std': 'launch_gap_day_std', 'var': 'launch_gap_day_var', 'kurt': 'launch_gap_day_kurt',
+                 'discrete': 'launch_gap_day_discrete'})
+    # duration / percent
+    launch_day_duration = launch.groupby(['user_id'])['launch_day'].agg(
+        {'launch_day_duration': lambda x: (end_day - min(x) + 1)}).reset_index()
+    launch_day_duration['launch_day_percent'] = (launch_total_count['launch_total_count'] - 1) / launch_day_duration[
+        'launch_day_duration']  # -1是为了区分只有一次启动但percent却为100%, #平均每天启动次数
+    weekend_day = launch.groupby(['user_id'])['launch_day'].agg(
+        {'launch_weekend_day_count': lambda x: (
+            len([day for day in np.unique(x[:-1]) if day % 7 == 0 or (day + 1) % 7 == 0]))}).reset_index()
+    weekend_day['launch_weekend_day_count_percent'] = weekend_day['launch_weekend_day_count'] / launch_total_count['launch_total_count']
+    continuous_launch_day = launch.groupby(['user_id'])['launch_day'].agg([get_continuous]).reset_index().rename(
+        columns={'get_continuous': 'continuous_launch_day'})
+    last_seven_launch_count = launch[(launch['launch_day'] >= end_day - 6) & (launch['launch_day'] <= end_day)].groupby(['user_id'])[
+        'launch_day'].size().rename('last_seven_launch_count').reset_index()
+    last_five_launch_count = launch[(launch['launch_day'] >= end_day - 4) & (launch['launch_day'] <= end_day)].groupby(['user_id'])[
+        'launch_day'].size().rename('last_five_launch_count').reset_index()
+    last_three_launch_count = launch[(launch['launch_day'] >= end_day - 2) & (launch['launch_day'] <= end_day)].groupby(['user_id'])[
+        'launch_day'].size().rename('last_three_launch_count').reset_index()
+    last_one_launch_count = launch[(launch['launch_day'] == end_day)].groupby(['user_id'])['launch_day'].size().rename(
+        'last_one_create_count').reset_index()
     launch_rest_day = (end_day - launch.groupby(['user_id'])['launch_day'].max()).rename('launch_rest_day').reset_index()  # 已有多少天未启动
-    # launch_rest_day['launch_average'] = launch_total_count['launch_total_count'].div(launch_rest_day['launch_rest_day'])#平均每天启动次数
+
     feature = pd.merge(feature, launch_total_count, how='left', on='user_id')
-    feature = pd.merge(feature, launch_day_diff_max, how='left', on='user_id')
-    feature = pd.merge(feature, launch_day_diff_min, how='left', on='user_id')
-    feature = pd.merge(feature, launch_day_diff_mean, how='left', on='user_id')
-    feature = pd.merge(feature, launch_day_diff_std, how='left', on='user_id')
-    feature = pd.merge(feature, launch_day_diff_kurt, how='left', on='user_id')
-    feature = pd.merge(feature, launch_day_diff_skew, how='left', on='user_id')
-    feature = pd.merge(feature, launch_day_diff_last, how='left', on='user_id')
-    feature = pd.merge(feature, launch_last_day, how='left', on='user_id')
+    feature = pd.merge(feature, launch_fun, how='left', on='user_id')
+    feature = pd.merge(feature, launch_day_duration, how='left', on='user_id')
+    feature = pd.merge(feature, weekend_day, how='left', on='user_id')
+    feature = pd.merge(feature, continuous_launch_day, how='left', on='user_id')
+    feature = pd.merge(feature, last_seven_launch_count, how='left', on='user_id')
+    feature = pd.merge(feature, last_five_launch_count, how='left', on='user_id')
+    feature = pd.merge(feature, last_three_launch_count, how='left', on='user_id')
+    feature = pd.merge(feature, last_one_launch_count, how='left', on='user_id')
     feature = pd.merge(feature, launch_rest_day, how='left', on='user_id')
-    # feature = pd.merge(feature, launch_fun, how='left', on=['user_id'])
     return feature
 
 
-def get_create_feature(video):
+"""
+    - 提取拍摄视频特征(create)
+    1.create天数序列特征 : 所有序列特征
+    2.create_diff序列(取unique,加入end day取diff) : 所有序列特征 ， 最后一个和倒数第二个值(没有则为0)
+    3.create 总天数,最后 7 5 3 1天的次数
+    4.第一次拍摄到时间窗末尾 
+    5.create percent ： 拍摄总天数(unique) / 第一次拍摄到时间窗末尾
+    6.create day连续序列: 所有序列特征
+    7.create count序列 : 所有序列特征
+    8.create count diff序列：所有序列特征 最后一个和倒数第一个值(没有则为0) 加和
+    9.周末的 create 总数
+    10.发生create的周末天数(unique)
+    10.周末create总次数 占比 周末create天数(unique)
+"""
+
+
+def get_create_feature(create):
+    create.sort_values(by=['user_id', 'create_day'], inplace=True)
     feature = pd.DataFrame()
-    feature['user_id'] = video['user_id'].drop_duplicates()
+    feature['user_id'] = create['user_id'].drop_duplicates()
     '''
     video_fun = video.groupby('user_id')['create_day'].agg(func).reset_index()
     video_fun = video_fun.rename(
@@ -163,31 +250,57 @@ def get_create_feature(video):
                  'ptp': 'video_ptp', 'var': 'video_var', 'var_divide_count': 'video_var_divide_count',
                  'last_one': 'video_last_one', 'q25': 'video_q25', 'q75': 'video_q75', 'kurt': 'video_kurt'})
                  '''
-    end_day = np.max(video['create_day'])
-    video_total_count = video[['user_id']].groupby(['user_id']).size().rename('video_total_count').reset_index()  # 总创建个数
-    video_day_diff = pd.concat([video['user_id'], video.groupby(['user_id']).diff().rename({'create_day': 'video_day_diff'}, axis=1)], axis=1)
-    video_day_diff_max = video_day_diff.groupby(['user_id'])['video_day_diff'].max().rename('video_day_diff_max').reset_index()
-    video_day_diff_min = video_day_diff.groupby(['user_id'])['video_day_diff'].min().rename('video_day_diff_min').reset_index()
-    video_day_diff_mean = video_day_diff.groupby(['user_id'])['video_day_diff'].mean().rename('video_day_diff_mean').reset_index()
-    video_day_diff_std = video_day_diff.groupby(['user_id'])['video_day_diff'].std().rename('video_day_diff_std').reset_index()
-    video_day_diff_kurt = video_day_diff.groupby(['user_id'])['video_day_diff'].agg(lambda x: pd.Series.kurt(x)).rename('video_day_diff_kurt').reset_index()
-    video_day_diff_skew = video_day_diff.groupby(['user_id'])['video_day_diff'].skew().rename('video_day_diff_skew').reset_index()
-    video_day_diff_last = video_day_diff.groupby(['user_id'])['video_day_diff'].last().rename('video_day_diff_last').reset_index()
-    video_last_day = video.groupby(['user_id'])['create_day'].max().rename('video_last_day').reset_index()  # 最后一次创建视频的日期
-    video_rest_day = (end_day - video.groupby(['user_id'])['create_day'].max()).rename('video_rest_day').reset_index()  # 已有多少天未创建视频
-    video_everyday_count = video.groupby(['user_id', 'create_day']).agg({'user_id': 'mean', 'create_day': 'count'})
+    end_day = np.max(create['create_day'])
+
+    create_total_count = create.groupby(['user_id']).size().rename('create_total_count').reset_index()  # 总创建个数
+    create_day_diff = pd.concat([create['user_id'], create.groupby(['user_id']).diff().rename({'create_day': 'video_day_diff'}, axis=1)],
+                                axis=1)
+    func = ['mean', 'median', 'max', 'min', 'var', 'std', skew, kurt, discrete]
+    create_fun = create_day_diff.groupby('user_id')['create_day_diff'].agg(func).reset_index()
+    create_fun = create_fun.rename(
+        columns={'mean': 'create_gap_day_mean', 'median': 'create_gap_day_median', 'max': 'create_gap_day_max', 'min': 'create_gap_day_min',
+                 'skew': 'create_gap_day_skew', 'std': 'create_gap_day_std', 'var': 'create_gap_day_var', 'kurt': 'create_gap_day_kurt',
+                 'discrete': 'create_gap_day_discrete'})
+    create_day_duration = create.groupby(['user_id'])['create_day'].agg(
+        {'create_day_duration': lambda x: (end_day - min(x) + 1)}).reset_index()  # 第一次拍摄到时间窗末尾的时间间隔
+    create_day_duration['create_day_count'] = create.groupby(['user_id'])['create_day'].agg(
+        {'launch_day_duration': lambda x: len(np.unique(x))})  # 统计创建过视频的天数
+    create_day_duration['create_day_percent'] = (create_day_duration['create_day_count'] - 1) / create_day_duration[
+        'create_day_duration']  # -1是为了区分只有一次启动但percent却为100%, #时间窗内有创建的天数时间比
+    create_total_count['create_count_percent'] = (create_total_count['create_total_count'] - 1) / create_day_duration[
+        'create_day_duration']  # 在时间窗内平均每天创建几个视频
+    weekend_day = create.groupby(['user_id'])['create_day'].agg(
+        {'create_weekend_day_count': lambda x: len([day for day in np.unique(x[:-1]) if day % 7 == 0 or (day + 1) % 7 == 0])})#有多少天在周末创建
+    weekend_day['create_weekend_day_all_count'] = create.groupby(['user_id'])['create_day'].agg(
+        {'create_weekend_day_count': lambda x: len([day for day in x[:-1] if day % 7 == 0 or (day + 1) % 7 == 0])})#在周末总共创建了多少个视频
+    weekend_day['create_weekend_day_count_percent'] = weekend_day['create_weekend_day_count'] / weekend_day['create_weekend_day_all_count']
+    continuous_cteate_day = create.groupby(['user_id'])['create_day'].agg([get_continuous]).reset_index().rename(
+        columns={'get_continuous': 'continuous_cteate_day'})
+    last_seven_create_count = create[(create['create_day'] >= end_day - 6) & (create['create_day'] <= end_day)].groupby(['user_id'])[
+        'create_day'].size().rename('last_seven_create_count').reset_index()
+    last_five_create_count = create[(create['create_day'] >= end_day - 4) & (create['create_day'] <= end_day)].groupby(['user_id'])[
+        'create_day'].size().rename('last_five_create_count').reset_index()
+    last_three_create_count = create[(create['create_day'] >= end_day - 2) & (create['create_day'] <= end_day)].groupby(['user_id'])[
+        'create_day'].size().rename('last_three_create_count').reset_index()
+    last_one_create_count = create[(create['create_day'] == end_day)].groupby(['user_id'])['create_day'].size().rename(
+        'last_one_create_count').reset_index()
+
+    create_rest_day = (end_day - create.groupby(['user_id'])['create_day'].max()).rename('create_rest_day').reset_index()  # 已有多少天未创建视频
+    video_everyday_count = create.groupby(['user_id', 'create_day']).agg({'user_id': 'mean', 'create_day': 'count'})
     video_day_most = video_everyday_count.groupby(['user_id'])['create_day'].max().rename('video_day_most').reset_index()
-    video_day_mode = video_everyday_count.groupby(['user_id'])['create_day'].agg(lambda x: np.mean(pd.Series.mode(x))).rename('video_day_mode').reset_index()
-    feature = pd.merge(feature, video_total_count, how='left', on='user_id')
-    feature = pd.merge(feature, video_day_diff_max, how='left', on='user_id')
-    feature = pd.merge(feature, video_day_diff_min, how='left', on='user_id')
-    feature = pd.merge(feature, video_day_diff_mean, how='left', on='user_id')
-    feature = pd.merge(feature, video_day_diff_std, how='left', on='user_id')
-    feature = pd.merge(feature, video_day_diff_kurt, how='left', on='user_id')
-    feature = pd.merge(feature, video_day_diff_skew, how='left', on='user_id')
-    feature = pd.merge(feature, video_day_diff_last, how='left', on='user_id')
-    feature = pd.merge(feature, video_last_day, how='left', on='user_id')
-    feature = pd.merge(feature, video_rest_day, how='left', on='user_id')
+    video_day_mode = video_everyday_count.groupby(['user_id'])['create_day'].agg(lambda x: np.mean(pd.Series.mode(x))).rename(
+        'video_day_mode').reset_index()
+
+    feature = pd.merge(feature, create_total_count, how='left', on='user_id')
+    feature = pd.merge(feature, create_day_duration, how='left', on='user_id')
+    feature = pd.merge(feature, weekend_day, how='left', on='user_id')
+    feature = pd.merge(feature, continuous_cteate_day, how='left', on='user_id')
+    feature = pd.merge(feature, last_seven_create_count, how='left', on='user_id')
+    feature = pd.merge(feature, last_five_create_count, how='left', on='user_id')
+    feature = pd.merge(feature, last_three_create_count, how='left', on='user_id')
+    feature = pd.merge(feature, last_one_create_count, how='left', on='user_id')
+    feature = pd.merge(feature, create_rest_day, how='left', on='user_id')
+    feature = pd.merge(feature, create_fun, how='left', on='user_id')
     feature = pd.merge(feature, video_day_most, how='left', on='user_id')
     feature = pd.merge(feature, video_day_mode, how='left', on='user_id')
     # feature = pd.merge(feature, video_fun, how='left', on=['user_id'])
@@ -199,26 +312,51 @@ def get_activity_feature(activity):
     feature = pd.DataFrame()
     feature['user_id'] = activity['user_id'].drop_duplicates()
     '''
+    func = ['count', 'max', 'min', 'mean', 'median', 'skew', 'std', 'mad', ptp, np.var, var_divide_count, last_one, q25, q75, kurt]
     activity_fun = activity.groupby('user_id')['activity_day'].agg(func).reset_index()
-    activity_fun = activity_fun.rename(
+    activity_fun.rename(
         columns={'min': 'act_min', 'mean': 'act_mean', 'median': 'act_median',
                  'skew': 'act_skew', 'std': 'act_std', 'mad': 'act_mad',
                  'ptp': 'act_ptp', 'var': 'act_var', 'var_divide_count': 'act_var_divide_count',
-                 'last_one': 'act_last_one', 'q25': 'act_q25', 'q75': 'act_q75', 'kurt': 'act_kurt'})
-                 '''
+                 'last_one': 'act_last_one', 'q25': 'act_q25', 'q75': 'act_q75', 'kurt': 'act_kurt'}, inplace=True)
+    '''
     end_day = np.max(activity['activity_day'])
+    start_day = np.min(activity['activity_day'])
+
+    # action 总次数, 最后 7 5 3 1
+    activity_total_count = activity.groupby(['user_id']).size().rename('activity_total_count').reset_index()  # 总活动次数
+    last_seven_activity_count = activity[(activity['activity_day'] >= end_day - 6) & (activity['activity_day'] <= end_day)].groupby(['user_id'])[
+        'activity_day'].size().rename('last_seven_activity_count').reset_index()
+    last_five_activity_count = activity[(activity['activity_day'] >= end_day - 4) & (activity['activity_day'] <= end_day)].groupby(['user_id'])[
+        'activity_day'].size().rename('last_five_activity_count').reset_index()
+    last_three_activity_count = activity[(activity['activity_day'] >= end_day - 2) & (activity['activity_day'] <= end_day)].groupby(['user_id'])[
+        'activity_day'].size().rename('last_three_activity_count').reset_index()
+    last_one_activity_count = activity[(activity['activity_day'] == end_day)].groupby(['user_id'])['activity_day'].size().rename(
+        'last_one_activity_count').reset_index()
+    # 周末总次数 , 周末的 Page 0 1 2 3 4 个数 , action_type 0 1 2 3 4 5 个数
+    all_weekend_count=activity.groupby(['user_id'])['activity_day'].agg(
+        {'create_weekend_day_count': lambda x: len([day for day in x[:-1] if day % 7 == 0 or (day + 1) % 7 == 0])})#在周末的总共活动次数
+
+
+    '''
     activity_total_count = activity[['user_id']].groupby(['user_id']).size().rename('activity_total_count').reset_index()  # 总活动次数
     activity_day_unique = activity.groupby(['user_id', 'activity_day']).agg({'user_id': 'mean', 'activity_day': 'mean'})
-    activity_day_diff = activity_day_unique.groupby(['user_id']).diff().rename({'activity_day': 'activity_day_diff'}, axis=1).reset_index().drop('activity_day', axis=1)
+    activity_day_diff = activity_day_unique.groupby(['user_id']).diff().rename({'activity_day': 'activity_day_diff'},
+                                                                               axis=1).reset_index().drop('activity_day', axis=1)
     activity_day_diff_max = activity_day_diff.groupby(['user_id'])['activity_day_diff'].max().rename('activity_day_diff_max').reset_index()
     activity_day_diff_min = activity_day_diff.groupby(['user_id'])['activity_day_diff'].min().rename('activity_day_diff_min').reset_index()
-    activity_day_diff_mean = activity_day_diff.groupby(['user_id'])['activity_day_diff'].mean().rename('activity_day_diff_mean').reset_index()
+    activity_day_diff_mean = activity_day_diff.groupby(['user_id'])['activity_day_diff'].mean().rename(
+        'activity_day_diff_mean').reset_index()
     activity_day_diff_std = activity_day_diff.groupby(['user_id'])['activity_day_diff'].std().rename('activity_day_diff_std').reset_index()
-    activity_day_diff_kurt = activity_day_diff.groupby(['user_id'])['activity_day_diff'].agg(lambda x: pd.Series.kurt(x)).rename('activity_day_diff_kurt').reset_index()
-    activity_day_diff_skew = activity_day_diff.groupby(['user_id'])['activity_day_diff'].skew().rename('activity_day_diff_skew').reset_index()
-    activity_day_diff_last = activity_day_diff.groupby(['user_id'])['activity_day_diff'].last().rename('activity_day_diff_last').reset_index()
+    activity_day_diff_kurt = activity_day_diff.groupby(['user_id'])['activity_day_diff'].agg(lambda x: pd.Series.kurt(x)).rename(
+        'activity_day_diff_kurt').reset_index()
+    activity_day_diff_skew = activity_day_diff.groupby(['user_id'])['activity_day_diff'].skew().rename(
+        'activity_day_diff_skew').reset_index()
+    activity_day_diff_last = activity_day_diff.groupby(['user_id'])['activity_day_diff'].last().rename(
+        'activity_day_diff_last').reset_index()
     activity_last_day = activity.groupby(['user_id'])['activity_day'].max().rename('activity_last_day').reset_index()  # 最后一次活动的日期
-    activity_rest_day = (end_day - activity_day_unique.groupby(['user_id'])['activity_day'].max()).rename('activity_rest_day').reset_index()  # 已有多少天未活动
+    activity_rest_day = (end_day - activity_day_unique.groupby(['user_id'])['activity_day'].max()).rename(
+        'activity_rest_day').reset_index()  # 已有多少天未活动
     page_count = activity.groupby(['user_id', 'page']).agg({'page': 'count'}).rename({'page': 'page_count'}, axis=1).reset_index()
     page0_count = page_count[page_count.page == 0].drop('page', axis=1).rename({'page_count': 'page0_count'}, axis=1)
     page1_count = page_count[page_count.page == 1].drop('page', axis=1).rename({'page_count': 'page1_count'}, axis=1)
@@ -260,114 +398,206 @@ def get_activity_feature(activity):
     video_id_most = video_id_count.groupby(['user_id'])['video_id'].max().rename('video_id_most').reset_index()
     author_id_count = activity.groupby(['user_id', 'author_id']).agg({'user_id': 'mean', 'author_id': 'count'})
     author_id_most = author_id_count.groupby(['user_id'])['author_id'].max().rename('author_id_most').reset_index()
-    activity_count = activity.groupby(['user_id', 'activity_day']).agg({'activity_day': 'count'}).rename({'activity_day': 'activity_count'}, axis=1).reset_index()
+    activity_count = activity.groupby(['user_id', 'activity_day']).agg({'activity_day': 'count'}).rename({'activity_day': 'activity_count'},
+                                                                                                         axis=1).reset_index()
     activity_count_max = activity_count.groupby(['user_id'])['activity_count'].max().rename('activity_count_max').reset_index()
     activity_count_min = activity_count.groupby(['user_id'])['activity_count'].min().rename('activity_count_min').reset_index()
     activity_count_mean = activity_count.groupby(['user_id'])['activity_count'].mean().rename('activity_count_mean').reset_index()
     activity_count_std = activity_count.groupby(['user_id'])['activity_count'].std().rename('activity_count_std').reset_index()
-    activity_count_kurt = activity_count.groupby(['user_id'])['activity_count'].agg(lambda x: pd.Series.kurt(x)).rename('activity_count_kurt').reset_index()
+    activity_count_kurt = activity_count.groupby(['user_id'])['activity_count'].agg(lambda x: pd.Series.kurt(x)).rename(
+        'activity_count_kurt').reset_index()
     activity_count_skew = activity_count.groupby(['user_id'])['activity_count'].skew().rename('activity_count_skew').reset_index()
     activity_count_last = activity_count.groupby(['user_id'])['activity_count'].last().rename('activity_count_last').reset_index()
-    activity_count_diff = pd.concat([activity_count['user_id'], activity_count.groupby(['user_id']).diff().rename({'activity_count': 'activity_count_diff'}, axis=1)], axis=1).drop(
+    activity_count_diff = pd.concat(
+        [activity_count['user_id'], activity_count.groupby(['user_id']).diff().rename({'activity_count': 'activity_count_diff'}, axis=1)],
+        axis=1).drop(
         'activity_day', axis=1)
-    activity_count_diff_max = activity_count_diff.groupby(['user_id'])['activity_count_diff'].max().rename('activity_count_diff_max').reset_index()
-    activity_count_diff_min = activity_count_diff.groupby(['user_id'])['activity_count_diff'].min().rename('activity_count_diff_min').reset_index()
-    activity_count_diff_mean = activity_count_diff.groupby(['user_id'])['activity_count_diff'].mean().rename('activity_count_diff_mean').reset_index()
-    activity_count_diff_std = activity_count_diff.groupby(['user_id'])['activity_count_diff'].std().rename('activity_count_diff_std').reset_index()
-    activity_count_diff_kurt = activity_count_diff.groupby(['user_id'])['activity_count_diff'].agg(lambda x: pd.Series.kurt(x)).rename('activity_count_diff_kurt').reset_index()
-    activity_count_diff_skew = activity_count_diff.groupby(['user_id'])['activity_count_diff'].skew().rename('activity_count_diff_skew').reset_index()
-    activity_count_diff_last = activity_count_diff.groupby(['user_id'])['activity_count_diff'].last().rename('activity_count_diff_last').reset_index()
-    page_everyday_count = activity.groupby(['user_id', 'activity_day', 'page']).agg({'page': 'count'}).rename({'page': 'page_everyday_count'}, axis=1).reset_index()
-    page0_max = page_everyday_count[page_everyday_count.page == 0].groupby(['user_id'])['page_everyday_count'].max().rename('page0_max').reset_index()
-    page0_min = page_everyday_count[page_everyday_count.page == 0].groupby(['user_id'])['page_everyday_count'].min().rename('page0_min').reset_index()
-    page0_mean = page_everyday_count[page_everyday_count.page == 0].groupby(['user_id'])['page_everyday_count'].mean().rename('page0_mean').reset_index()
-    page0_std = page_everyday_count[page_everyday_count.page == 0].groupby(['user_id'])['page_everyday_count'].std().rename('page0_std').reset_index()
-    page0_kurt = page_everyday_count[page_everyday_count.page == 0].groupby(['user_id'])['page_everyday_count'].agg(lambda x: pd.Series.kurt(x)).rename('page0_kurt').reset_index()
-    page0_skew = page_everyday_count[page_everyday_count.page == 0].groupby(['user_id'])['page_everyday_count'].skew().rename('page0_skew').reset_index()
-    page0_last = page_everyday_count[page_everyday_count.page == 0].groupby(['user_id'])['page_everyday_count'].last().rename('page0_last').reset_index()
-    page1_max = page_everyday_count[page_everyday_count.page == 1].groupby(['user_id'])['page_everyday_count'].max().rename('page1_max').reset_index()
-    page1_min = page_everyday_count[page_everyday_count.page == 1].groupby(['user_id'])['page_everyday_count'].min().rename('page1_min').reset_index()
-    page1_mean = page_everyday_count[page_everyday_count.page == 1].groupby(['user_id'])['page_everyday_count'].mean().rename('page1_mean').reset_index()
-    page1_std = page_everyday_count[page_everyday_count.page == 1].groupby(['user_id'])['page_everyday_count'].std().rename('page1_std').reset_index()
-    page1_kurt = page_everyday_count[page_everyday_count.page == 1].groupby(['user_id'])['page_everyday_count'].agg(lambda x: pd.Series.kurt(x)).rename('page1_kurt').reset_index()
-    page1_skew = page_everyday_count[page_everyday_count.page == 1].groupby(['user_id'])['page_everyday_count'].skew().rename('page1_skew').reset_index()
-    page1_last = page_everyday_count[page_everyday_count.page == 1].groupby(['user_id'])['page_everyday_count'].last().rename('page1_last').reset_index()
-    page2_max = page_everyday_count[page_everyday_count.page == 2].groupby(['user_id'])['page_everyday_count'].max().rename('page2_max').reset_index()
-    page2_min = page_everyday_count[page_everyday_count.page == 2].groupby(['user_id'])['page_everyday_count'].min().rename('page2_min').reset_index()
-    page2_mean = page_everyday_count[page_everyday_count.page == 2].groupby(['user_id'])['page_everyday_count'].mean().rename('page2_mean').reset_index()
-    page2_std = page_everyday_count[page_everyday_count.page == 2].groupby(['user_id'])['page_everyday_count'].std().rename('page2_std').reset_index()
-    page2_kurt = page_everyday_count[page_everyday_count.page == 2].groupby(['user_id'])['page_everyday_count'].agg(lambda x: pd.Series.kurt(x)).rename('page2_kurt').reset_index()
-    page2_skew = page_everyday_count[page_everyday_count.page == 2].groupby(['user_id'])['page_everyday_count'].skew().rename('page2_skew').reset_index()
-    page2_last = page_everyday_count[page_everyday_count.page == 2].groupby(['user_id'])['page_everyday_count'].last().rename('page2_last').reset_index()
-    page3_max = page_everyday_count[page_everyday_count.page == 3].groupby(['user_id'])['page_everyday_count'].max().rename('page3_max').reset_index()
-    page3_min = page_everyday_count[page_everyday_count.page == 3].groupby(['user_id'])['page_everyday_count'].min().rename('page3_min').reset_index()
-    page3_mean = page_everyday_count[page_everyday_count.page == 3].groupby(['user_id'])['page_everyday_count'].mean().rename('page3_mean').reset_index()
-    page3_std = page_everyday_count[page_everyday_count.page == 3].groupby(['user_id'])['page_everyday_count'].std().rename('page3_std').reset_index()
-    page3_kurt = page_everyday_count[page_everyday_count.page == 3].groupby(['user_id'])['page_everyday_count'].agg(lambda x: pd.Series.kurt(x)).rename('page3_kurt').reset_index()
-    page3_skew = page_everyday_count[page_everyday_count.page == 3].groupby(['user_id'])['page_everyday_count'].skew().rename('page3_skew').reset_index()
-    page3_last = page_everyday_count[page_everyday_count.page == 3].groupby(['user_id'])['page_everyday_count'].last().rename('page3_last').reset_index()
-    page4_max = page_everyday_count[page_everyday_count.page == 4].groupby(['user_id'])['page_everyday_count'].max().rename('page4_max').reset_index()
-    page4_min = page_everyday_count[page_everyday_count.page == 4].groupby(['user_id'])['page_everyday_count'].min().rename('page4_min').reset_index()
-    page4_mean = page_everyday_count[page_everyday_count.page == 4].groupby(['user_id'])['page_everyday_count'].mean().rename('page4_mean').reset_index()
-    page4_std = page_everyday_count[page_everyday_count.page == 4].groupby(['user_id'])['page_everyday_count'].std().rename('page4_std').reset_index()
-    page4_kurt = page_everyday_count[page_everyday_count.page == 4].groupby(['user_id'])['page_everyday_count'].agg(lambda x: pd.Series.kurt(x)).rename('page4_kurt').reset_index()
-    page4_skew = page_everyday_count[page_everyday_count.page == 4].groupby(['user_id'])['page_everyday_count'].skew().rename('page4_skew').reset_index()
-    page4_last = page_everyday_count[page_everyday_count.page == 4].groupby(['user_id'])['page_everyday_count'].last().rename('page4_last').reset_index()
-    action_everyday_count = activity.groupby(['user_id', 'activity_day', 'action']).agg({'action': 'count'}).rename({'action': 'action_everyday_count'}, axis=1).reset_index()
-    action0_max = action_everyday_count[action_everyday_count.action == 0].groupby(['user_id'])['action_everyday_count'].max().rename('action0_max').reset_index()
-    action0_min = action_everyday_count[action_everyday_count.action == 0].groupby(['user_id'])['action_everyday_count'].min().rename('action0_min').reset_index()
-    action0_mean = action_everyday_count[action_everyday_count.action == 0].groupby(['user_id'])['action_everyday_count'].mean().rename('action0_mean').reset_index()
-    action0_std = action_everyday_count[action_everyday_count.action == 0].groupby(['user_id'])['action_everyday_count'].std().rename('action0_std').reset_index()
-    action0_kurt = action_everyday_count[action_everyday_count.action == 0].groupby(['user_id'])['action_everyday_count'].agg(lambda x: pd.Series.kurt(x)).rename(
+    activity_count_diff_max = activity_count_diff.groupby(['user_id'])['activity_count_diff'].max().rename(
+        'activity_count_diff_max').reset_index()
+    activity_count_diff_min = activity_count_diff.groupby(['user_id'])['activity_count_diff'].min().rename(
+        'activity_count_diff_min').reset_index()
+    activity_count_diff_mean = activity_count_diff.groupby(['user_id'])['activity_count_diff'].mean().rename(
+        'activity_count_diff_mean').reset_index()
+    activity_count_diff_std = activity_count_diff.groupby(['user_id'])['activity_count_diff'].std().rename(
+        'activity_count_diff_std').reset_index()
+    activity_count_diff_kurt = activity_count_diff.groupby(['user_id'])['activity_count_diff'].agg(lambda x: pd.Series.kurt(x)).rename(
+        'activity_count_diff_kurt').reset_index()
+    activity_count_diff_skew = activity_count_diff.groupby(['user_id'])['activity_count_diff'].skew().rename(
+        'activity_count_diff_skew').reset_index()
+    activity_count_diff_last = activity_count_diff.groupby(['user_id'])['activity_count_diff'].last().rename(
+        'activity_count_diff_last').reset_index()
+    page_everyday_count = activity.groupby(['user_id', 'activity_day', 'page']).agg({'page': 'count'}).rename(
+        {'page': 'page_everyday_count'}, axis=1).reset_index()
+    page0_max = page_everyday_count[page_everyday_count.page == 0].groupby(['user_id'])['page_everyday_count'].max().rename(
+        'page0_max').reset_index()
+    page0_min = page_everyday_count[page_everyday_count.page == 0].groupby(['user_id'])['page_everyday_count'].min().rename(
+        'page0_min').reset_index()
+    page0_mean = page_everyday_count[page_everyday_count.page == 0].groupby(['user_id'])['page_everyday_count'].mean().rename(
+        'page0_mean').reset_index()
+    page0_std = page_everyday_count[page_everyday_count.page == 0].groupby(['user_id'])['page_everyday_count'].std().rename(
+        'page0_std').reset_index()
+    page0_kurt = page_everyday_count[page_everyday_count.page == 0].groupby(['user_id'])['page_everyday_count'].agg(
+        lambda x: pd.Series.kurt(x)).rename('page0_kurt').reset_index()
+    page0_skew = page_everyday_count[page_everyday_count.page == 0].groupby(['user_id'])['page_everyday_count'].skew().rename(
+        'page0_skew').reset_index()
+    page0_last = page_everyday_count[page_everyday_count.page == 0].groupby(['user_id'])['page_everyday_count'].last().rename(
+        'page0_last').reset_index()
+    page1_max = page_everyday_count[page_everyday_count.page == 1].groupby(['user_id'])['page_everyday_count'].max().rename(
+        'page1_max').reset_index()
+    page1_min = page_everyday_count[page_everyday_count.page == 1].groupby(['user_id'])['page_everyday_count'].min().rename(
+        'page1_min').reset_index()
+    page1_mean = page_everyday_count[page_everyday_count.page == 1].groupby(['user_id'])['page_everyday_count'].mean().rename(
+        'page1_mean').reset_index()
+    page1_std = page_everyday_count[page_everyday_count.page == 1].groupby(['user_id'])['page_everyday_count'].std().rename(
+        'page1_std').reset_index()
+    page1_kurt = page_everyday_count[page_everyday_count.page == 1].groupby(['user_id'])['page_everyday_count'].agg(
+        lambda x: pd.Series.kurt(x)).rename('page1_kurt').reset_index()
+    page1_skew = page_everyday_count[page_everyday_count.page == 1].groupby(['user_id'])['page_everyday_count'].skew().rename(
+        'page1_skew').reset_index()
+    page1_last = page_everyday_count[page_everyday_count.page == 1].groupby(['user_id'])['page_everyday_count'].last().rename(
+        'page1_last').reset_index()
+    page2_max = page_everyday_count[page_everyday_count.page == 2].groupby(['user_id'])['page_everyday_count'].max().rename(
+        'page2_max').reset_index()
+    page2_min = page_everyday_count[page_everyday_count.page == 2].groupby(['user_id'])['page_everyday_count'].min().rename(
+        'page2_min').reset_index()
+    page2_mean = page_everyday_count[page_everyday_count.page == 2].groupby(['user_id'])['page_everyday_count'].mean().rename(
+        'page2_mean').reset_index()
+    page2_std = page_everyday_count[page_everyday_count.page == 2].groupby(['user_id'])['page_everyday_count'].std().rename(
+        'page2_std').reset_index()
+    page2_kurt = page_everyday_count[page_everyday_count.page == 2].groupby(['user_id'])['page_everyday_count'].agg(
+        lambda x: pd.Series.kurt(x)).rename('page2_kurt').reset_index()
+    page2_skew = page_everyday_count[page_everyday_count.page == 2].groupby(['user_id'])['page_everyday_count'].skew().rename(
+        'page2_skew').reset_index()
+    page2_last = page_everyday_count[page_everyday_count.page == 2].groupby(['user_id'])['page_everyday_count'].last().rename(
+        'page2_last').reset_index()
+    page3_max = page_everyday_count[page_everyday_count.page == 3].groupby(['user_id'])['page_everyday_count'].max().rename(
+        'page3_max').reset_index()
+    page3_min = page_everyday_count[page_everyday_count.page == 3].groupby(['user_id'])['page_everyday_count'].min().rename(
+        'page3_min').reset_index()
+    page3_mean = page_everyday_count[page_everyday_count.page == 3].groupby(['user_id'])['page_everyday_count'].mean().rename(
+        'page3_mean').reset_index()
+    page3_std = page_everyday_count[page_everyday_count.page == 3].groupby(['user_id'])['page_everyday_count'].std().rename(
+        'page3_std').reset_index()
+    page3_kurt = page_everyday_count[page_everyday_count.page == 3].groupby(['user_id'])['page_everyday_count'].agg(
+        lambda x: pd.Series.kurt(x)).rename('page3_kurt').reset_index()
+    page3_skew = page_everyday_count[page_everyday_count.page == 3].groupby(['user_id'])['page_everyday_count'].skew().rename(
+        'page3_skew').reset_index()
+    page3_last = page_everyday_count[page_everyday_count.page == 3].groupby(['user_id'])['page_everyday_count'].last().rename(
+        'page3_last').reset_index()
+    page4_max = page_everyday_count[page_everyday_count.page == 4].groupby(['user_id'])['page_everyday_count'].max().rename(
+        'page4_max').reset_index()
+    page4_min = page_everyday_count[page_everyday_count.page == 4].groupby(['user_id'])['page_everyday_count'].min().rename(
+        'page4_min').reset_index()
+    page4_mean = page_everyday_count[page_everyday_count.page == 4].groupby(['user_id'])['page_everyday_count'].mean().rename(
+        'page4_mean').reset_index()
+    page4_std = page_everyday_count[page_everyday_count.page == 4].groupby(['user_id'])['page_everyday_count'].std().rename(
+        'page4_std').reset_index()
+    page4_kurt = page_everyday_count[page_everyday_count.page == 4].groupby(['user_id'])['page_everyday_count'].agg(
+        lambda x: pd.Series.kurt(x)).rename('page4_kurt').reset_index()
+    page4_skew = page_everyday_count[page_everyday_count.page == 4].groupby(['user_id'])['page_everyday_count'].skew().rename(
+        'page4_skew').reset_index()
+    page4_last = page_everyday_count[page_everyday_count.page == 4].groupby(['user_id'])['page_everyday_count'].last().rename(
+        'page4_last').reset_index()
+    action_everyday_count = activity.groupby(['user_id', 'activity_day', 'action']).agg({'action': 'count'}).rename(
+        {'action': 'action_everyday_count'}, axis=1).reset_index()
+    action0_max = action_everyday_count[action_everyday_count.action == 0].groupby(['user_id'])['action_everyday_count'].max().rename(
+        'action0_max').reset_index()
+    action0_min = action_everyday_count[action_everyday_count.action == 0].groupby(['user_id'])['action_everyday_count'].min().rename(
+        'action0_min').reset_index()
+    action0_mean = action_everyday_count[action_everyday_count.action == 0].groupby(['user_id'])['action_everyday_count'].mean().rename(
+        'action0_mean').reset_index()
+    action0_std = action_everyday_count[action_everyday_count.action == 0].groupby(['user_id'])['action_everyday_count'].std().rename(
+        'action0_std').reset_index()
+    action0_kurt = action_everyday_count[action_everyday_count.action == 0].groupby(['user_id'])['action_everyday_count'].agg(
+        lambda x: pd.Series.kurt(x)).rename(
         'action0_kurt').reset_index()
-    action0_skew = action_everyday_count[action_everyday_count.action == 0].groupby(['user_id'])['action_everyday_count'].skew().rename('action0_skew').reset_index()
-    action0_last = action_everyday_count[action_everyday_count.action == 0].groupby(['user_id'])['action_everyday_count'].last().rename('action0_last').reset_index()
-    action1_max = action_everyday_count[action_everyday_count.action == 1].groupby(['user_id'])['action_everyday_count'].max().rename('action1_max').reset_index()
-    action1_min = action_everyday_count[action_everyday_count.action == 1].groupby(['user_id'])['action_everyday_count'].min().rename('action1_min').reset_index()
-    action1_mean = action_everyday_count[action_everyday_count.action == 1].groupby(['user_id'])['action_everyday_count'].mean().rename('action1_mean').reset_index()
-    action1_std = action_everyday_count[action_everyday_count.action == 1].groupby(['user_id'])['action_everyday_count'].std().rename('action1_std').reset_index()
-    action1_kurt = action_everyday_count[action_everyday_count.action == 1].groupby(['user_id'])['action_everyday_count'].agg(lambda x: pd.Series.kurt(x)).rename(
+    action0_skew = action_everyday_count[action_everyday_count.action == 0].groupby(['user_id'])['action_everyday_count'].skew().rename(
+        'action0_skew').reset_index()
+    action0_last = action_everyday_count[action_everyday_count.action == 0].groupby(['user_id'])['action_everyday_count'].last().rename(
+        'action0_last').reset_index()
+    action1_max = action_everyday_count[action_everyday_count.action == 1].groupby(['user_id'])['action_everyday_count'].max().rename(
+        'action1_max').reset_index()
+    action1_min = action_everyday_count[action_everyday_count.action == 1].groupby(['user_id'])['action_everyday_count'].min().rename(
+        'action1_min').reset_index()
+    action1_mean = action_everyday_count[action_everyday_count.action == 1].groupby(['user_id'])['action_everyday_count'].mean().rename(
+        'action1_mean').reset_index()
+    action1_std = action_everyday_count[action_everyday_count.action == 1].groupby(['user_id'])['action_everyday_count'].std().rename(
+        'action1_std').reset_index()
+    action1_kurt = action_everyday_count[action_everyday_count.action == 1].groupby(['user_id'])['action_everyday_count'].agg(
+        lambda x: pd.Series.kurt(x)).rename(
         'action1_kurt').reset_index()
-    action1_skew = action_everyday_count[action_everyday_count.action == 1].groupby(['user_id'])['action_everyday_count'].skew().rename('action1_skew').reset_index()
-    action1_last = action_everyday_count[action_everyday_count.action == 1].groupby(['user_id'])['action_everyday_count'].last().rename('action1_last').reset_index()
-    action2_max = action_everyday_count[action_everyday_count.action == 2].groupby(['user_id'])['action_everyday_count'].max().rename('action2_max').reset_index()
-    action2_min = action_everyday_count[action_everyday_count.action == 2].groupby(['user_id'])['action_everyday_count'].min().rename('action2_min').reset_index()
-    action2_mean = action_everyday_count[action_everyday_count.action == 2].groupby(['user_id'])['action_everyday_count'].mean().rename('action2_mean').reset_index()
-    action2_std = action_everyday_count[action_everyday_count.action == 2].groupby(['user_id'])['action_everyday_count'].std().rename('action2_std').reset_index()
-    action2_kurt = action_everyday_count[action_everyday_count.action == 2].groupby(['user_id'])['action_everyday_count'].agg(lambda x: pd.Series.kurt(x)).rename(
+    action1_skew = action_everyday_count[action_everyday_count.action == 1].groupby(['user_id'])['action_everyday_count'].skew().rename(
+        'action1_skew').reset_index()
+    action1_last = action_everyday_count[action_everyday_count.action == 1].groupby(['user_id'])['action_everyday_count'].last().rename(
+        'action1_last').reset_index()
+    action2_max = action_everyday_count[action_everyday_count.action == 2].groupby(['user_id'])['action_everyday_count'].max().rename(
+        'action2_max').reset_index()
+    action2_min = action_everyday_count[action_everyday_count.action == 2].groupby(['user_id'])['action_everyday_count'].min().rename(
+        'action2_min').reset_index()
+    action2_mean = action_everyday_count[action_everyday_count.action == 2].groupby(['user_id'])['action_everyday_count'].mean().rename(
+        'action2_mean').reset_index()
+    action2_std = action_everyday_count[action_everyday_count.action == 2].groupby(['user_id'])['action_everyday_count'].std().rename(
+        'action2_std').reset_index()
+    action2_kurt = action_everyday_count[action_everyday_count.action == 2].groupby(['user_id'])['action_everyday_count'].agg(
+        lambda x: pd.Series.kurt(x)).rename(
         'action2_kurt').reset_index()
-    action2_skew = action_everyday_count[action_everyday_count.action == 2].groupby(['user_id'])['action_everyday_count'].skew().rename('action2_skew').reset_index()
-    action2_last = action_everyday_count[action_everyday_count.action == 2].groupby(['user_id'])['action_everyday_count'].last().rename('action2_last').reset_index()
-    action3_max = action_everyday_count[action_everyday_count.action == 3].groupby(['user_id'])['action_everyday_count'].max().rename('action3_max').reset_index()
-    action3_min = action_everyday_count[action_everyday_count.action == 3].groupby(['user_id'])['action_everyday_count'].min().rename('action3_min').reset_index()
-    action3_mean = action_everyday_count[action_everyday_count.action == 3].groupby(['user_id'])['action_everyday_count'].mean().rename('action3_mean').reset_index()
-    action3_std = action_everyday_count[action_everyday_count.action == 3].groupby(['user_id'])['action_everyday_count'].std().rename('action3_std').reset_index()
-    action3_kurt = action_everyday_count[action_everyday_count.action == 3].groupby(['user_id'])['action_everyday_count'].agg(lambda x: pd.Series.kurt(x)).rename(
+    action2_skew = action_everyday_count[action_everyday_count.action == 2].groupby(['user_id'])['action_everyday_count'].skew().rename(
+        'action2_skew').reset_index()
+    action2_last = action_everyday_count[action_everyday_count.action == 2].groupby(['user_id'])['action_everyday_count'].last().rename(
+        'action2_last').reset_index()
+    action3_max = action_everyday_count[action_everyday_count.action == 3].groupby(['user_id'])['action_everyday_count'].max().rename(
+        'action3_max').reset_index()
+    action3_min = action_everyday_count[action_everyday_count.action == 3].groupby(['user_id'])['action_everyday_count'].min().rename(
+        'action3_min').reset_index()
+    action3_mean = action_everyday_count[action_everyday_count.action == 3].groupby(['user_id'])['action_everyday_count'].mean().rename(
+        'action3_mean').reset_index()
+    action3_std = action_everyday_count[action_everyday_count.action == 3].groupby(['user_id'])['action_everyday_count'].std().rename(
+        'action3_std').reset_index()
+    action3_kurt = action_everyday_count[action_everyday_count.action == 3].groupby(['user_id'])['action_everyday_count'].agg(
+        lambda x: pd.Series.kurt(x)).rename(
         'action3_kurt').reset_index()
-    action3_skew = action_everyday_count[action_everyday_count.action == 3].groupby(['user_id'])['action_everyday_count'].skew().rename('action3_skew').reset_index()
-    action3_last = action_everyday_count[action_everyday_count.action == 3].groupby(['user_id'])['action_everyday_count'].last().rename('action3_last').reset_index()
-    action4_max = action_everyday_count[action_everyday_count.action == 4].groupby(['user_id'])['action_everyday_count'].max().rename('action4_max').reset_index()
-    action4_min = action_everyday_count[action_everyday_count.action == 4].groupby(['user_id'])['action_everyday_count'].min().rename('action4_min').reset_index()
-    action4_mean = action_everyday_count[action_everyday_count.action == 4].groupby(['user_id'])['action_everyday_count'].mean().rename('action4_mean').reset_index()
-    action4_std = action_everyday_count[action_everyday_count.action == 4].groupby(['user_id'])['action_everyday_count'].std().rename('action4_std').reset_index()
-    action4_kurt = action_everyday_count[action_everyday_count.action == 4].groupby(['user_id'])['action_everyday_count'].agg(lambda x: pd.Series.kurt(x)).rename(
+    action3_skew = action_everyday_count[action_everyday_count.action == 3].groupby(['user_id'])['action_everyday_count'].skew().rename(
+        'action3_skew').reset_index()
+    action3_last = action_everyday_count[action_everyday_count.action == 3].groupby(['user_id'])['action_everyday_count'].last().rename(
+        'action3_last').reset_index()
+    action4_max = action_everyday_count[action_everyday_count.action == 4].groupby(['user_id'])['action_everyday_count'].max().rename(
+        'action4_max').reset_index()
+    action4_min = action_everyday_count[action_everyday_count.action == 4].groupby(['user_id'])['action_everyday_count'].min().rename(
+        'action4_min').reset_index()
+    action4_mean = action_everyday_count[action_everyday_count.action == 4].groupby(['user_id'])['action_everyday_count'].mean().rename(
+        'action4_mean').reset_index()
+    action4_std = action_everyday_count[action_everyday_count.action == 4].groupby(['user_id'])['action_everyday_count'].std().rename(
+        'action4_std').reset_index()
+    action4_kurt = action_everyday_count[action_everyday_count.action == 4].groupby(['user_id'])['action_everyday_count'].agg(
+        lambda x: pd.Series.kurt(x)).rename(
         'action4_kurt').reset_index()
-    action4_skew = action_everyday_count[action_everyday_count.action == 4].groupby(['user_id'])['action_everyday_count'].skew().rename('action4_skew').reset_index()
-    action4_last = action_everyday_count[action_everyday_count.action == 4].groupby(['user_id'])['action_everyday_count'].last().rename('action4_last').reset_index()
-    action5_max = action_everyday_count[action_everyday_count.action == 5].groupby(['user_id'])['action_everyday_count'].max().rename('action5_max').reset_index()
-    action5_min = action_everyday_count[action_everyday_count.action == 5].groupby(['user_id'])['action_everyday_count'].min().rename('action5_min').reset_index()
-    action5_mean = action_everyday_count[action_everyday_count.action == 5].groupby(['user_id'])['action_everyday_count'].mean().rename('action5_mean').reset_index()
-    action5_std = action_everyday_count[action_everyday_count.action == 5].groupby(['user_id'])['action_everyday_count'].std().rename('action5_std').reset_index()
-    action5_kurt = action_everyday_count[action_everyday_count.action == 5].groupby(['user_id'])['action_everyday_count'].agg(lambda x: pd.Series.kurt(x)).rename(
+    action4_skew = action_everyday_count[action_everyday_count.action == 4].groupby(['user_id'])['action_everyday_count'].skew().rename(
+        'action4_skew').reset_index()
+    action4_last = action_everyday_count[action_everyday_count.action == 4].groupby(['user_id'])['action_everyday_count'].last().rename(
+        'action4_last').reset_index()
+    action5_max = action_everyday_count[action_everyday_count.action == 5].groupby(['user_id'])['action_everyday_count'].max().rename(
+        'action5_max').reset_index()
+    action5_min = action_everyday_count[action_everyday_count.action == 5].groupby(['user_id'])['action_everyday_count'].min().rename(
+        'action5_min').reset_index()
+    action5_mean = action_everyday_count[action_everyday_count.action == 5].groupby(['user_id'])['action_everyday_count'].mean().rename(
+        'action5_mean').reset_index()
+    action5_std = action_everyday_count[action_everyday_count.action == 5].groupby(['user_id'])['action_everyday_count'].std().rename(
+        'action5_std').reset_index()
+    action5_kurt = action_everyday_count[action_everyday_count.action == 5].groupby(['user_id'])['action_everyday_count'].agg(
+        lambda x: pd.Series.kurt(x)).rename(
         'action5_kurt').reset_index()
-    action5_skew = action_everyday_count[action_everyday_count.action == 5].groupby(['user_id'])['action_everyday_count'].skew().rename('action5_skew').reset_index()
-    action5_last = action_everyday_count[action_everyday_count.action == 5].groupby(['user_id'])['action_everyday_count'].last().rename('action5_last').reset_index()
+    action5_skew = action_everyday_count[action_everyday_count.action == 5].groupby(['user_id'])['action_everyday_count'].skew().rename(
+        'action5_skew').reset_index()
+    action5_last = action_everyday_count[action_everyday_count.action == 5].groupby(['user_id'])['action_everyday_count'].last().rename(
+        'action5_last').reset_index()
     most_activity_day = \
-        activity_count.groupby('user_id').apply(lambda x: x[x.activity_count == x.activity_count.max()]).rename({'activity_day': 'most_activity_day'}, axis=1).drop(
+        activity_count.groupby('user_id').apply(lambda x: x[x.activity_count == x.activity_count.max()]).rename(
+            {'activity_day': 'most_activity_day'}, axis=1).drop(
             'activity_count',
             axis=1).groupby(
             'user_id')['most_activity_day'].max().reset_index()
-    author_count = activity.groupby('author_id').agg({'author_id': 'mean', 'activity_day': 'count'}).rename({'author_id': 'user_id', 'activity_day': 'author_count'}, axis=1)
+    author_count = activity.groupby('author_id').agg({'author_id': 'mean', 'activity_day': 'count'}).rename(
+        {'author_id': 'user_id', 'activity_day': 'author_count'}, axis=1)
 
     feature = pd.merge(feature, activity_total_count, how='left', on='user_id')
     feature = pd.merge(feature, activity_day_diff_max, how='left', on='user_id')
@@ -476,6 +706,7 @@ def get_activity_feature(activity):
     feature = pd.merge(feature, action5_last, how='left', on='user_id')
     feature = pd.merge(feature, most_activity_day, how='left', on='user_id')
     feature = pd.merge(feature, author_count, how='left', on='user_id')
+    '''
     # feature = pd.merge(feature, activity_fun, how='left', on=['user_id'])
     return feature
 
@@ -518,31 +749,31 @@ def get_data_feature():
     train_label_1 = get_train_label(train_1_feat_dir, train_1_label_dir)
     data_1 = deal_feature(train_1_feat_dir, train_label_1['user_id'])
     data_1['label'] = train_label_1['label']
-    data_1.to_csv(train_path+'data_1.csv', index=False)
+    data_1.to_csv(train_path + 'data_1.csv', index=False)
 
     print('Getting train data 2 ...')
     train_label_2 = get_train_label(train_2_feat_dir, train_2_label_dir)
     data_2 = deal_feature(train_2_feat_dir, train_label_2['user_id'])
     data_2['label'] = train_label_2['label']
-    data_2.to_csv(train_path+'data_2.csv', index=False)
+    data_2.to_csv(train_path + 'data_2.csv', index=False)
 
     print('Getting train data 3 ...')
     train_label_3 = get_train_label(train_3_feat_dir, train_3_label_dir)
     data_3 = deal_feature(train_3_feat_dir, train_label_3['user_id'])
     data_3['label'] = train_label_3['label']
-    data_3.to_csv(train_path+'data_3.csv', index=False)
+    data_3.to_csv(train_path + 'data_3.csv', index=False)
 
     print('Getting train data 4 ...')
     train_label_4 = get_train_label(train_4_feat_dir, train_4_label_dir)
     data_4 = deal_feature(train_4_feat_dir, train_label_4['user_id'])
     data_4['label'] = train_label_4['label']
-    data_4.to_csv(train_path+'data_4.csv', index=False)
+    data_4.to_csv(train_path + 'data_4.csv', index=False)
 
     print('Getting train data 5 ...')
     train_label_5 = get_train_label(train_5_feat_dir, train_5_label_dir)
     data_5 = deal_feature(train_5_feat_dir, train_label_5['user_id'])
     data_5['label'] = train_label_5['label']
-    data_5.to_csv(train_path+'data_5.csv', index=False)
+    data_5.to_csv(train_path + 'data_5.csv', index=False)
 
     # train_data = pd.concat([data_1, data_2])
     # train_data.to_csv(train_path, index=False)

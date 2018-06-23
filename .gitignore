@@ -108,3 +108,5 @@ venv.bak/
 solution/Kesci-master/
 solution/Kesci-masterV1/
 solution/chenwi/
+solution/catboost_info/
+*.zip
