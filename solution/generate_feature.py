@@ -552,13 +552,22 @@ def get_activity_feature(activity):
     return feature
 
 
+def get_my_fea(row, action):
+    test1=row.loc[0, 'user_id']
+    test = action[action['author_id'] == test1]
+    test2 = test['user_id']
+    return len(np.unique(test2))
+
+
 def deal_feature(path, user_id):
-    register = pd.read_csv(path + '_register.csv')
-    launch = pd.read_csv(path + '_launch.csv')
+    # register = pd.read_csv(path + '_register.csv')
+    # launch = pd.read_csv(path + '_launch.csv')
     create = pd.read_csv(path + '_create.csv')
     activity = pd.read_csv(path + '_activity.csv')
     feature = pd.DataFrame()
     feature['user_id'] = user_id
+
+    test1 = create.groupby('user_id').agg(get_my_fea, action=activity)
 
     print('getting register feature...')
     register_feature = get_register_feature(register)
